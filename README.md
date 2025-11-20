@@ -43,8 +43,8 @@ Ensure you have the following installed on your local machine:
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/blog-api.git
-   cd blog-api
+   git clone https://github.com/vishantCodes/blogs.git
+   cd blogs
    ```
 
 2. **Install PHP dependencies**:
