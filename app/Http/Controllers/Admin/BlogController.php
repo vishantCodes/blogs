@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Models\Blog;
+use App\Models\Like;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Controller;
@@ -33,16 +34,28 @@ class BlogController extends Controller
 				->when($request->sort_by === 'most_liked', fn($q) => $q->orderByDesc('likes_count'))
 				->when($request->sort_by === 'latest' || !$request->filled('sort_by'), fn($q) => $q->latest());
 
+			// Add is_liked_by_user via subquery (single query, no N+1)
+			if (auth()->check()) {
+				$query->addSelect([
+					'blogs.*',
+					'is_liked_by_user' => Like::selectRaw('COUNT(*) > 0')
+						->whereColumn('likeable_id', 'blogs.id')
+						->where('likeable_type', Blog::class)
+						->where('user_id', auth()->id())
+						->limit(1)
+				]);
+			}
+
 			$perPage = $request->integer('per_page', 10);
 			$blogs = $query->paginate($perPage);
 
-			// Add is_liked_by_user flag using lazy collection
-			$blogs->through(function ($blog) {
-				$blog->is_liked_by_user = $blog->likes()
-					->where('user_id', auth()->id())
-					->exists();
-				return $blog;
-			});
+			// If user is not authenticated, add is_liked_by_user = false
+			if (!auth()->check()) {
+				$blogs->through(function ($blog) {
+					$blog->is_liked_by_user = false;
+					return $blog;
+				});
+			}
 
 			return response()->json([
 				'success' => true,
@@ -70,7 +83,7 @@ class BlogController extends Controller
 			$imagePath = $request->file('image')?->store('blogs', 'public');
 			$blog = auth()->user()->blogs()->create([
 				...$validated,
-				'image' => $imagePath
+				'image_path' => $imagePath
 			]);
 			return response()->json([
 				'success' => true,
@@ -104,11 +117,19 @@ class BlogController extends Controller
 	public function show(Blog $blog): JsonResponse
 	{
 		try {
+			// Load relationships and counts efficiently
 			$blog->load('user:id,name,email')
 				->loadCount('likes');
 
-			// Check if liked by current user
-			$blog->is_liked_by_user = $blog->isLikedBy(auth()->user());
+			// Check if liked by current user using subquery (avoiding extra query)
+			if (auth()->check()) {
+				$blog->is_liked_by_user = Like::where('likeable_id', $blog->id)
+					->where('likeable_type', Blog::class)
+					->where('user_id', auth()->id())
+					->exists();
+			} else {
+				$blog->is_liked_by_user = false;
+			}
 
 			return response()->json([
 				'success' => true,
@@ -130,24 +151,15 @@ class BlogController extends Controller
 	public function update(UpdateBlogRequest $request, Blog $blog): JsonResponse
 	{
 		try {
-			// Check authorization using Policy
 			$this->authorize('update', $blog);
-
 			$validated = $request->validated();
-
-			// Handle image upload if present
 			if ($request->hasFile('image')) {
-				// Delete old image
-				if ($blog->image) {
-					Storage::disk('public')->delete($blog->image);
+				if ($blog->image_path) {  // Changed from $blog->image
+					Storage::disk('public')->delete($blog->image_path);
 				}
-				// Store new image and add to validated data
-				$validated['image'] = $request->file('image')->store('blogs', 'public');
+				$validated['image_path'] = $request->file('image')->store('blogs', 'public');  // Changed from 'image'
 			}
-
-			// Update blog
 			$blog->update($validated);
-
 			return response()->json([
 				'success' => true,
 				'message' => 'Blog updated successfully',
@@ -173,7 +185,6 @@ class BlogController extends Controller
 			], 500);
 		}
 	}
-
 	/**
 	 * Delete a blog
 	 */
@@ -182,10 +193,9 @@ class BlogController extends Controller
 		try {
 			// Check authorization using Policy
 			$this->authorize('delete', $blog);
-
 			// Delete image from storage
-			if ($blog->image) {
-				Storage::disk('public')->delete($blog->image);
+			if ($blog->image_path) {  // Changed from $blog->image
+				Storage::disk('public')->delete($blog->image_path);
 			}
 
 			// Delete blog
