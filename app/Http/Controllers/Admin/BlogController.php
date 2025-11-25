@@ -28,34 +28,20 @@ class BlogController extends Controller
 				->withCount('likes')
 				->when($request->filled('search'), function ($q) use ($request) {
 					$search = $request->search;
-					$q->where('title', 'like', "%{$search}%")
-						->orWhere('description', 'like', "%{$search}%");
+					$q->where(function ($q) use ($search) {
+						$q->where('title', 'like', "%{$search}%")
+							->orWhere('description', 'like', "%{$search}%");
+					});
 				})
 				->when($request->sort_by === 'most_liked', fn($q) => $q->orderByDesc('likes_count'))
-				->when($request->sort_by === 'latest' || !$request->filled('sort_by'), fn($q) => $q->latest());
-
-			// Add is_liked_by_user via subquery (single query, no N+1)
-			if (auth()->check()) {
-				$query->addSelect([
-					'blogs.*',
-					'is_liked_by_user' => Like::selectRaw('COUNT(*) > 0')
-						->whereColumn('likeable_id', 'blogs.id')
-						->where('likeable_type', Blog::class)
-						->where('user_id', auth()->id())
-						->limit(1)
+				->when($request->sort_by === 'latest' || !$request->filled('sort_by'), fn($q) => $q->latest())
+				->withExists([
+					'likes as is_liked_by_user' => fn($q) =>
+					$q->where('user_id', auth()->id()),
 				]);
-			}
 
 			$perPage = $request->integer('per_page', 10);
 			$blogs = $query->paginate($perPage);
-
-			// If user is not authenticated, add is_liked_by_user = false
-			if (!auth()->check()) {
-				$blogs->through(function ($blog) {
-					$blog->is_liked_by_user = false;
-					return $blog;
-				});
-			}
 
 			return response()->json([
 				'success' => true,
@@ -70,6 +56,7 @@ class BlogController extends Controller
 			], 500);
 		}
 	}
+
 
 	/**
 	 * Create a new blog
@@ -116,33 +103,19 @@ class BlogController extends Controller
 	 */
 	public function show(Blog $blog): JsonResponse
 	{
-		try {
-			// Load relationships and counts efficiently
-			$blog->load('user:id,name,email')
-				->loadCount('likes');
-
-			// Check if liked by current user using subquery (avoiding extra query)
-			if (auth()->check()) {
-				$blog->is_liked_by_user = Like::where('likeable_id', $blog->id)
-					->where('likeable_type', Blog::class)
-					->where('user_id', auth()->id())
-					->exists();
-			} else {
-				$blog->is_liked_by_user = false;
-			}
-
-			return response()->json([
-				'success' => true,
-				'message' => 'Blog retrieved successfully',
-				'data' => $blog
+		$blog->load([
+			'user:id,name,email'
+		])->loadCount('likes')
+			->loadExists([
+				'likes as is_liked_by_user' => fn($q) =>
+				$q->where('user_id', auth()->id()),
 			]);
-		} catch (\Exception $e) {
-			return response()->json([
-				'success' => false,
-				'message' => 'Blog not found',
-				'error' => $e->getMessage()
-			], 404);
-		}
+
+		return response()->json([
+			'success' => true,
+			'message' => 'Blog retrieved successfully',
+			'data' => $blog
+		]);
 	}
 
 	/**
